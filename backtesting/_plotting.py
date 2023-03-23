@@ -6,14 +6,15 @@ from colorsys import hls_to_rgb, rgb_to_hls
 from itertools import cycle, combinations
 from functools import partial
 from typing import Callable, List, Union
+import collections
 
 import numpy as np
 import pandas as pd
 
 from bokeh.colors import RGB
 from bokeh.colors.named import (
-    lime as BULL_COLOR,
-    tomato as BEAR_COLOR
+    teal as BULL_COLOR,
+    fuchsia as BEAR_COLOR
 )
 from bokeh.plotting import figure as _figure
 from bokeh.models import (  # type: ignore
@@ -38,7 +39,7 @@ from bokeh.layouts import gridplot
 from bokeh.palettes import Category10
 from bokeh.transform import factor_cmap
 
-from backtesting._util import _data_period, _as_list, _Indicator
+from backtesting._util import _data_period, _as_list, _Indicator, _IndicatorGroup
 
 with open(os.path.join(os.path.dirname(__file__), 'autoscale_cb.js'),
           encoding='utf-8') as _f:
@@ -92,15 +93,15 @@ def lightness(color, lightness=.94):
     return RGB(*rgb)
 
 
-_MAX_CANDLES = 10_000
+_MAX_CANDLES = 100_000
 
 
-def _maybe_resample_data(resample_rule, df, indicators, equity_data, trades):
+def _maybe_resample_data(resample_rule, df, indicators, indicators_groups, equity_data, trades):
     if isinstance(resample_rule, str):
         freq = resample_rule
     else:
         if resample_rule is False or len(df) <= _MAX_CANDLES:
-            return df, indicators, equity_data, trades
+            return df, indicators, indicators_groups, equity_data, trades
 
         freq_minutes = pd.Series({
             "1T": 1,
@@ -133,6 +134,17 @@ def _maybe_resample_data(resample_rule, df, indicators, equity_data, trades):
                   for i in indicators]
     assert not indicators or indicators[0].df.index.equals(df.index)
 
+
+    for group_name in indicators_groups:
+        indicators_groups[group_name] = [_IndicatorGroup(i.df.resample(freq, label='right').mean()
+                                 .dropna().reindex(df.index).values.T,
+                                 **dict(i._opts, name=i.name,
+                                        # Replace saved index with the resampled one
+                                        index=df.index))
+                      for i in indicators_groups[group_name]]
+        assert not indicators or indicators[0].df.index.equals(df.index)
+
+
     equity_data = equity_data.resample(freq, label='right').agg(_EQUITY_AGG).dropna(how='all')
     assert equity_data.index.equals(df.index)
 
@@ -158,12 +170,13 @@ def _maybe_resample_data(resample_rule, df, indicators, equity_data, trades):
             ExitBar=_group_trades('ExitTime'),
         )).dropna()
 
-    return df, indicators, equity_data, trades
+    return df, indicators, indicators_groups, equity_data, trades
 
 
 def plot(*, results: pd.Series,
          df: pd.DataFrame,
          indicators: List[_Indicator],
+         indicators_groups: list[dict[_IndicatorGroup]],
          filename='', plot_width=None,
          plot_equity=True, plot_return=False, plot_pl=True,
          plot_volume=True, plot_drawdown=False, plot_trades=True,
@@ -200,8 +213,8 @@ def plot(*, results: pd.Series,
 
     # Limit data to max_candles
     if is_datetime_index:
-        df, indicators, equity_data, trades = _maybe_resample_data(
-            resample, df, indicators, equity_data, trades)
+        df, indicators, indicators_groups, equity_data, trades = _maybe_resample_data(
+            resample, df, indicators, indicators_groups, equity_data, trades)
 
     df.index.name = None  # Provides source name @index
     df['datetime'] = df.index  # Save original, maybe datetime index
@@ -212,6 +225,7 @@ def plot(*, results: pd.Series,
     new_bokeh_figure = partial(
         _figure,
         x_axis_type='linear',
+        #y_axis_type='log',
         width=plot_width,
         height=400,
         tools="xpan,xwheel_zoom,box_zoom,undo,redo,reset,save",
@@ -268,8 +282,10 @@ return this.labels[index] || "";
                             '@Close{0,0.0[0000]}'))),
         ('Volume', '@Volume{0,0}')]
 
-    def new_indicator_figure(**kwargs):
-        kwargs.setdefault('height', 90)
+    def new_indicator_figure(group=False, **kwargs):
+        height = 250 if group is True else 120
+
+        kwargs.setdefault('height', height)
         fig = new_bokeh_figure(x_range=fig_ohlc.x_range,
                                active_scroll='xwheel_zoom',
                                active_drag='xpan',
@@ -587,6 +603,87 @@ return this.labels[index] || "";
                     fig.legend.glyph_width = 0
         return indicator_figs
 
+    def _plot_indicator_groups():
+        """Strategy indicator Groups"""
+
+        def _too_many_dims(value):
+            assert value.ndim >= 2
+            if value.ndim > 2:
+                warnings.warn(f"Can't plot indicators with >2D ('{value.name}')",
+                              stacklevel=5)
+                return True
+            return False
+
+        class LegendStr(str):
+            # The legend string is such a string that only matches
+            # itself if it's the exact same object. This ensures
+            # legend items are listed separately even when they have the
+            # same string contents. Otherwise, Bokeh would always consider
+            # equal strings as one and the same legend item.
+            def __eq__(self, other):
+                return self is other
+
+        ohlc_colors = colorgen()
+        indicator_group_figs = []
+
+        for group_name in indicators_groups:
+
+            legend_label = LegendStr(group_name)
+            fig = new_indicator_figure(group=True)
+            indicator_group_figs.append(fig)
+
+            for i, value in enumerate(indicators_groups[group_name]):
+                value = np.atleast_2d(value)
+
+                # Use .get()! A user might have assigned a Strategy.data-evolved
+                # _Array without Strategy.I()
+                if not value._opts.get('plot') or _too_many_dims(value):
+                    continue
+
+                # No overlay option for groups.
+                is_overlay = False
+                is_scatter = value._opts['scatter']
+
+                tooltips = []
+                colors = value._opts['color']
+                colors = colors and cycle(_as_list(colors)) or (
+                    cycle([next(ohlc_colors)]) if is_overlay else colorgen())
+                legend_label = LegendStr(value.name)
+                for j, arr in enumerate(value, 1):
+                    color = next(colors)
+                    source_name = f'{legend_label}_{i}_{j}'
+                    if arr.dtype == bool:
+                        arr = arr.astype(int)
+                    source.add(arr, source_name)
+                    tooltips.append(f'@{{{source_name}}}{{0,0.0[0000]}}')
+
+                    if is_scatter:
+                        r = fig.scatter(
+                            'index', source_name, source=source,
+                            legend_label=LegendStr(legend_label), color=color,
+                            marker='circle', radius=BAR_WIDTH / 2 * .9)
+                    else:
+                        r = fig.line(
+                            'index', source_name, source=source,
+                            legend_label=LegendStr(legend_label), line_color=color,
+                            line_width=1.3)
+                    # Add dashed centerline just because
+                    mean = float(pd.Series(arr).mean())
+                    if not np.isnan(mean) and (abs(mean) < .1 or
+                                               round(abs(mean), 1) == .5 or
+                                               round(abs(mean), -1) in (50, 100, 200)):
+                        fig.add_layout(Span(location=float(mean), dimension='width',
+                                            line_color='#666666', line_dash='dashed',
+                                            line_width=.5))
+
+                set_tooltips(fig, [(legend_label, NBSP.join(tooltips))], vline=True, renderers=[r])
+                # If the sole indicator line on this figure,
+                # have the legend only contain text without the glyph
+                if len(value) == 1:
+                    fig.legend.glyph_width = 0
+
+        return indicator_group_figs
+
     # Construct figure ...
 
     if plot_equity:
@@ -612,9 +709,11 @@ return this.labels[index] || "";
     if plot_trades:
         _plot_ohlc_trades()
     indicator_figs = _plot_indicators()
+    indicator_group_figs = _plot_indicator_groups()
     if reverse_indicators:
         indicator_figs = indicator_figs[::-1]
     figs_below_ohlc.extend(indicator_figs)
+    figs_below_ohlc.extend(indicator_group_figs)
 
     set_tooltips(fig_ohlc, ohlc_tooltips, vline=True, renderers=[ohlc_bars])
 

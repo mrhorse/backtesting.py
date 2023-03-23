@@ -17,6 +17,7 @@ from itertools import chain, compress, product, repeat
 from math import copysign
 from numbers import Number
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Type, Union
+import collections
 
 import numpy as np
 import pandas as pd
@@ -31,7 +32,7 @@ except ImportError:
 
 from ._plotting import plot  # noqa: I001
 from ._stats import compute_stats
-from ._util import _as_str, _Indicator, _Data, try_
+from ._util import _as_str, _Indicator, _IndicatorGroup, _Data, try_
 
 __pdoc__ = {
     'Strategy.__init__': False,
@@ -51,6 +52,7 @@ class Strategy(metaclass=ABCMeta):
     """
     def __init__(self, broker, data, params):
         self._indicators = []
+        self._indicators_groups = collections.defaultdict(list)
         self._broker: _Broker = broker
         self._data: _Data = data
         self._params = self._check_params(params)
@@ -77,7 +79,7 @@ class Strategy(metaclass=ABCMeta):
 
     def I(self,  # noqa: E743
           func: Callable, *args,
-          name=None, plot=True, overlay=None, color=None, scatter=False,
+          name=None, plot=True, overlay=None, color=None, scatter=False, group=None,
           **kwargs) -> np.ndarray:
         """
         Declare an indicator. An indicator is just an array of values,
@@ -106,6 +108,8 @@ class Strategy(metaclass=ABCMeta):
 
         If `scatter` is `True`, the plotted indicator marker will be a
         circle instead of a connected line segment (default).
+
+        Group - identifier of an indicator group to place the indicator in.
 
         Additional `*args` and `**kwargs` are passed to `func` and can
         be used for parameters.
@@ -152,12 +156,21 @@ class Strategy(metaclass=ABCMeta):
             with np.errstate(invalid='ignore'):
                 overlay = ((x < 1.4) & (x > .6)).mean() > .6
 
-        value = _Indicator(value, name=name, plot=plot, overlay=overlay,
-                           color=color, scatter=scatter,
-                           # _Indicator.s Series accessor uses this:
-                           index=self.data.index)
-        self._indicators.append(value)
+
+        if (group is None):
+            value = _Indicator(value, name=name, plot=plot, overlay=overlay,
+                               color=color, scatter=scatter,
+                               # _Indicator.s Series accessor uses this:
+                               index=self.data.index)
+            self._indicators.append(value)
+        else:
+            value = _IndicatorGroup(value, name=name, group=group, plot=plot, overlay=overlay,
+                               color=color, scatter=scatter,
+                               # _Indicator.s Series accessor uses this:
+                               index=self.data.index)
+            self._indicators_groups[group].append(value)
         return value
+
 
     @abstractmethod
     def init(self):
@@ -1647,6 +1660,7 @@ class Backtest:
             results=results,
             df=self._data,
             indicators=results._strategy._indicators,
+            indicators_groups=results._strategy._indicators_groups,
             filename=filename,
             plot_width=plot_width,
             plot_equity=plot_equity,

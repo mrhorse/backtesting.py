@@ -99,6 +99,9 @@ class _Array(np.ndarray):
 class _Indicator(_Array):
     pass
 
+class _IndicatorGroup(_Array):
+    pass
+
 
 class _Data:
     """
