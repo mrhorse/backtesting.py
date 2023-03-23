@@ -1204,7 +1204,7 @@ class Backtest:
         # Indicators used in Strategy.next()
         indicator_attrs = {attr: indicator
                            for attr, indicator in strategy.__dict__.items()
-                           if isinstance(indicator, _Indicator)}.items()
+                           if isinstance(indicator, (_Indicator, _IndicatorGroup))}.items()
 
         # Skip first few candles where indicators are still "warming up"
         # +1 to have at least two entries available

@@ -628,10 +628,18 @@ return this.labels[index] || "";
 
         for group_name in indicators_groups:
 
+<<<<<<< Updated upstream
             legend_label = LegendStr(group_name)
             fig = new_indicator_figure(group=True)
             indicator_group_figs.append(fig)
 
+=======
+            fig = new_indicator_figure(group=True)
+            fig.title.text = group_name
+            indicator_group_figs.append(fig)
+
+
+>>>>>>> Stashed changes
             for i, value in enumerate(indicators_groups[group_name]):
                 value = np.atleast_2d(value)
 
